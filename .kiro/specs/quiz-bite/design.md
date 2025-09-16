@@ -24,8 +24,8 @@ QuizBiteは、Next.js（フロントエンド）とGo（バックエンド）を
 
 ### 技術スタック
 
-- **フロントエンド**: Next.js 14 + TypeScript + TailwindCSS
-- **バックエンド**: Go 1.21 + Gin Framework
+- **フロントエンド**: Next.js 15 + TypeScript + TailwindCSS
+- **バックエンド**: Go 1.25 + Echo Framework
 - **データベース**: MySQL 8.0
 - **AI生成**: AWS Bedrock (Claude)
 - **開発環境**: Docker Compose
@@ -52,22 +52,23 @@ QuizBiteは、Next.js（フロントエンド）とGo（バックエンド）を
 
 #### ユーザー向けAPI
 ```
-GET /api/themes              # テーマ一覧取得
-GET /api/themes/featured     # 今日のお題取得
-GET /api/quiz/:theme_id      # クイズセット取得
-POST /api/quiz/submit        # 回答送信
-GET /api/user/stats          # ユーザー統計取得
+GET /themes                  # テーマ一覧取得
+GET /themes/featured         # 今日のお題取得
+GET /themes/:id/quiz-set     # テーマのクイズセット取得
+POST /quiz-sets/submit       # 回答送信
+GET /user/stats              # ユーザー統計取得
 ```
 
 #### 管理者向けAPI
 ```
-POST /api/admin/login        # 管理者ログイン
-GET /api/admin/themes        # テーマ管理一覧
-POST /api/admin/themes       # テーマ作成
-PUT /api/admin/themes/:id    # テーマ更新
-DELETE /api/admin/themes/:id # テーマ削除
-POST /api/admin/generate     # AI問題生成
-POST /api/admin/featured     # 注目テーマ設定
+POST /admin/login                        # 管理者ログイン
+GET /admin/themes                        # テーマ管理一覧
+POST /admin/themes                       # テーマ作成
+PUT /admin/themes/:id                    # テーマ更新
+DELETE /admin/themes/:id                 # テーマ削除
+POST /admin/themes/:id/generate-quiz-set # テーマのAI問題生成
+POST /admin/featured                     # 注目テーマ設定
+PUT /admin/quiz-sets/:id/publish         # クイズセット公開状態切り替え
 ```
 
 ## データモデル
@@ -89,19 +90,21 @@ CREATE TABLE themes (
 #### quiz_sets テーブル
 ```sql
 CREATE TABLE quiz_sets (
-    id INT PRIMARY KEY AUTO_INCREMENT,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
     theme_id INT NOT NULL,
+    is_published BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (theme_id) REFERENCES themes(id) ON DELETE CASCADE,
-    INDEX idx_theme_id (theme_id)
+    FOREIGN KEY (theme_id) REFERENCES themes(id),
+    INDEX idx_theme_id (theme_id),
+    INDEX idx_published (is_published)
 );
 ```
 
 #### questions テーブル
 ```sql
 CREATE TABLE questions (
-    id INT PRIMARY KEY AUTO_INCREMENT,
-    quiz_set_id INT NOT NULL,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    quiz_set_id BIGINT NOT NULL,
     question_text TEXT NOT NULL,
     option_a VARCHAR(200) NOT NULL,
     option_b VARCHAR(200) NOT NULL,
@@ -110,7 +113,7 @@ CREATE TABLE questions (
     correct_answer ENUM('A', 'B', 'C', 'D') NOT NULL,
     explanation TEXT,
     question_order INT NOT NULL,
-    FOREIGN KEY (quiz_set_id) REFERENCES quiz_sets(id) ON DELETE CASCADE,
+    FOREIGN KEY (quiz_set_id) REFERENCES quiz_sets(id),
     INDEX idx_quiz_set_id (quiz_set_id)
 );
 ```
@@ -127,14 +130,14 @@ CREATE TABLE user_sessions (
 #### attempts テーブル
 ```sql
 CREATE TABLE attempts (
-    id INT PRIMARY KEY AUTO_INCREMENT,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
     session_id VARCHAR(36) NOT NULL,
-    question_id INT NOT NULL,
+    question_id BIGINT NOT NULL,
     selected_answer ENUM('A', 'B', 'C', 'D') NOT NULL,
     is_correct BOOLEAN NOT NULL,
     answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (session_id) REFERENCES user_sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES user_sessions(id),
+    FOREIGN KEY (question_id) REFERENCES questions(id),
     UNIQUE KEY unique_session_question (session_id, question_id),
     INDEX idx_session_id (session_id),
     INDEX idx_question_id (question_id)
@@ -148,7 +151,7 @@ CREATE TABLE daily_featured (
     theme_id INT NOT NULL,
     featured_date DATE NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (theme_id) REFERENCES themes(id) ON DELETE CASCADE,
+    FOREIGN KEY (theme_id) REFERENCES themes(id),
     UNIQUE KEY unique_date (featured_date),
     INDEX idx_featured_date (featured_date)
 );
@@ -184,14 +187,15 @@ erDiagram
     }
     
     quiz_sets {
-        int id PK
+        bigint id PK
         int theme_id FK
+        boolean is_published
         timestamp created_at
     }
     
     questions {
-        int id PK
-        int quiz_set_id FK
+        bigint id PK
+        bigint quiz_set_id FK
         text question_text
         string option_a
         string option_b
@@ -209,9 +213,9 @@ erDiagram
     }
     
     attempts {
-        int id PK
+        bigint id PK
         string session_id FK
-        int question_id FK
+        bigint question_id FK
         enum selected_answer
         boolean is_correct
         timestamp answered_at
@@ -278,57 +282,37 @@ type ErrorResponse struct {
 - ユーザーインタラクションテスト
 - カスタムフックのテスト
 
-#### 統合テスト
-- APIとの連携テスト
-- ページ遷移テスト
-- エラーハンドリングテスト
-
 ### バックエンドテスト
 
 #### 単体テスト
 ```go
-// テスト例
+// テスト例（モックを使用）
 func TestQuizService_GetQuizSet(t *testing.T) {
-    // モックデータベース設定
+    // モックリポジトリ設定
+    mockRepo := &MockQuizRepository{}
+    service := NewQuizService(mockRepo)
+    
     // テストケース実行
+    result, err := service.GetQuizSet(1)
+    
     // アサーション
+    assert.NoError(t, err)
+    assert.NotNil(t, result)
 }
 ```
 
-#### 統合テスト
-- データベース連携テスト
-- AI生成API連携テスト
-- エンドツーエンドAPIテスト
+### データベースクエリ最適化
 
-### テストデータ管理
+#### インデックス戦略
+- `quiz_sets`: `theme_id`, `is_published` にインデックス
+- `questions`: `quiz_set_id` にインデックス
+- `attempts`: `session_id`, `question_id` にインデックス
+- `daily_featured`: `featured_date` にインデックス
 
-#### シードデータ
-```sql
--- テスト用テーマデータ
-INSERT INTO themes (title, description) VALUES 
-('ラッコの生態', 'ラッコに関する豆知識'),
-('日本の歴史', '日本史の興味深いエピソード');
-
--- テスト用問題セット
-INSERT INTO quiz_sets (theme_id) VALUES (1), (2);
-```
-
-#### テスト環境設定
-- Docker Compose でのテスト用DB構築
-- テストデータの自動投入
-- テスト実行後のクリーンアップ
-
-### パフォーマンステスト
-
-#### フロントエンド
-- Lighthouse による性能測定
-- Core Web Vitals の監視
-- バンドルサイズの最適化
-
-#### バックエンド
-- API レスポンス時間測定
-- データベースクエリ最適化
-- 同時接続数テスト
+#### クエリ最適化
+- N+1問題の回避（JOINまたはバッチ取得）
+- 必要なカラムのみ取得
+- ページネーション実装
 
 ## セキュリティ考慮事項
 
@@ -345,4 +329,3 @@ INSERT INTO quiz_sets (theme_id) VALUES (1), (2);
 ### プライバシー
 - ユーザー個人情報の最小化
 - セッションIDのみでユーザー識別
-- データ保持期間の制限
